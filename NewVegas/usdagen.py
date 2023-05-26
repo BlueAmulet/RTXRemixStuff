@@ -5,7 +5,7 @@ import argparse
 import xxhash
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageOps
     have_PIL = True
 except:
     print('Warning: Pillow not installed, normal map reflectivity disabled')
@@ -48,7 +48,7 @@ def calculate_hash(file_path):
     elif pfFlags & 0x20242: # DDPF_ALPHA | DDPF_RGB | DDPF_YUV | DDPF_LUMINANCE
         mipsize = mipsize*bitCount//8
 
-    return xxhash.xxh3_64(data[128:128+mipsize]).hexdigest()
+    return xxhash.xxh3_64(data[128:128+mipsize]).hexdigest().upper()
 
 
 def write_dds(file_name, img):
@@ -67,16 +67,20 @@ def write_dds(file_name, img):
         f.write(b'\0' * 44) # Reserved
         # Pixel format
         f.write((32).to_bytes(4, 'little')) # Format header size
-        f.write(b'\x00\x00\x02\x00') # Format flags (Single channel uncompressed)
-        f.write(b'\0\0\0\0') # FourCC
-        f.write((8).to_bytes(4, 'little')) # Bit Count
-        f.write((255).to_bytes(4, 'little')) # R mask
-        f.write(b'\0' * 12) # G B A masks
+        f.write(b'\x04\x00\x00\x00') # Format flags (Single channel uncompressed)
+        f.write(b'DX10') # FourCC
+        f.write(b'\0' * 20) # Bit count and R G B A masks
         f.write(b'\x08\x10\x40\x00') # Caps (Complex, Texture, MipMaps)
         f.write(b'\0' * 16) # Extra caps and reserved
+        # DX10 Header
+        f.write((61).to_bytes(4, 'little')) # DXGI format
+        f.write((3).to_bytes(4, 'little')) # Texture2D resource
+        f.write((0).to_bytes(4, 'little')) # Misc flags
+        f.write((1).to_bytes(4, 'little')) # Array size
+        f.write((0).to_bytes(4, 'little')) # Misc flags 2
         # Write image data
         for i in range(1, mipmaps+1):
-            f.write(img.tobytes('raw', 'A'))
+            f.write(img.tobytes('raw'))
             if i != mipmaps:
                 img = img.resize((img.size[0] // 2, img.size[1] // 2), resample=Image.BILINEAR)
 
@@ -96,6 +100,7 @@ if __name__ == '__main__':
     # Write USDA
     materials = 0
     textures = 0
+    generated = 0
     with open(args.output, 'w') as f:
         # Write USDA header
         f.write('#usda 1.0\nover "RootNode"\n{\n\tover "Looks"\n\t{\n')
@@ -104,7 +109,7 @@ if __name__ == '__main__':
         used_hashes = {}
         for root, _, files in os.walk(args.textures):
             for file in files:
-                fname = os.path.join(root, file).replace('\\', '/')
+                fname = os.path.join(root, file)
                 fname_noext = os.path.splitext(fname)[0]
                 if fname_noext.endswith('_d'): # Some diffuse end in _d
                     fname_noext = fname_noext[:-2]
@@ -139,15 +144,21 @@ if __name__ == '__main__':
                         materials += 1
                         used_hashes[diffuse_hash] = (input_set, hash_set)
                         if have_PIL and '_n' in inputs and not args.no_reflection:
-                            # Split alpha off of normal map
-                            with Image.open(inputs['_n']) as img:
-                                if 'A' in img.mode:
-                                    os.makedirs(os.path.join('generated', os.path.dirname(fname)), exist_ok=True)
-                                    fname_reflect = os.path.join('generated', fname_noext + '_r.dds')
-                                    inputs['reflect'] = fname_reflect
-                                    write_dds(fname_reflect, img)
-                                else:
-                                    print(f'Warning: {inputs["_n"]}: expected alpha in mode, found {img.mode}')
+                            # PIL loads DXT1 as RGBA, despite there being no alpha channel
+                            with open(inputs['_n'], 'rb') as dds:
+                                dds.seek(84)
+                                has_alpha = dds.read(4) != b'DXT1'
+                            if has_alpha:
+                                # Split alpha off of normal map
+                                with Image.open(inputs['_n']) as img:
+                                    if 'A' in img.mode:
+                                        os.makedirs(os.path.join('generated', os.path.dirname(fname)), exist_ok=True)
+                                        fname_reflect = os.path.join('generated', fname_noext + '_r.dds')
+                                        inputs['reflect'] = fname_reflect
+                                        write_dds(fname_reflect, ImageOps.invert(img.getchannel('A')))
+                                        generated += 1
+                                    else:
+                                        print(f'Warning: {inputs["_n"]}: expected alpha in mode, found {img.mode}')
 
                         # Write material to USDA
                         f.write('\t\tover "mat_' + diffuse_hash + '"\n\t\t{\n\t\t\tover "Shader"\n\t\t\t{\n')
@@ -158,14 +169,15 @@ if __name__ == '__main__':
                             # Set up emission
                             f.write('\t\t\t\tfloat inputs:emissive_intensity = 10 \n')
                         # Write texture inputs
-                        f.write('\t\t\t\tasset inputs:diffuse_texture = @./' + fname + '@ \n')
+                        f.write('\t\t\t\tasset inputs:diffuse_texture = @' + fname + '@ \n')
                         for ext in inputs:
                             if ext == 'reflect':
-                                f.write(f'\t\t\t\tasset inputs:inputs:reflectionroughness_texture = @./' + inputs[ext] + '@ \n')
+                                f.write(f'\t\t\t\tasset inputs:reflectionroughness_texture = @' + inputs[ext] + '@ \n')
                             else:
-                                f.write(f'\t\t\t\tasset inputs:{extensions[ext]} = @./' + inputs[ext] + '@ \n')
+                                f.write(f'\t\t\t\tasset inputs:{extensions[ext]} = @' + inputs[ext] + '@ \n')
                         f.write('\t\t\t}\n\t\t}\n')
         # Write USDA footer
         f.write('\t}\n}\n')
     print(f'Wrote {materials} materials')
+    print(f'Wrote {generated} textures')
     print(f'Used {textures} textures')
