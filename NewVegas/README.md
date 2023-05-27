@@ -28,6 +28,15 @@ NVSE plugin to send lighting information and disable features that cause issues 
 [Fallout Alpha Rendering Tweaks](https://www.nexusmods.com/newvegas/mods/80316) by Wall_SoGB  
 Fixes some rendering bugs, notably "Alpha blending carrying over into meshes that don't have it enabled"
 
+## Performance
+Too slow? Try some of the following:
+
+NewVegasRTXHelper disables culling to help prevent light leaking, but this causes additional load on the CPU and GPU.  
+Under NVSE\Plugins\NewVegasRTXLight.ini, set `DisableCulling=False`
+
+Alpha blending is very slow in RTX Remix, in the Remix UI (Alt-X) Rendering -> Alpha Test/Blending -> Uncheck "Render Alpha Blended"  
+This will cause parts of the world to stop rendering however.
+
 ## Bad Textures
 07252F80D34A9D78 textures\interface\interfaceshared0.dds  
 Causes rasterization in conversations, otherwise needed
@@ -39,3 +48,6 @@ Causes rasterization in interiors
 
 46469FCAC447E09B textures\effects\fxdustsmallgen01.dds  
 Not drawn properly, and ghosts badly
+
+0x54822C49AE5A2038 textures\interface\hud\glow_messages_radiation_seperator_right.dds  
+Causes rasterization in the Doc Mitchell intro
