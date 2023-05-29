@@ -34,7 +34,7 @@ if __name__ == '__main__':
 
     # PIL required to process DDS
     try:
-        from PIL import Image, ImageOps
+        from PIL import Image, ImageChops
         have_PIL = True
     except:
         print('Warning: Pillow not installed, normal map reflectivity disabled')
@@ -90,9 +90,9 @@ blacklist = [
 'textures/shared/shadefade03_n.dds',
 ]
 
+
 def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
-
 
 def calculate_hash(file_path):
     if not os.path.exists(file_path):
@@ -118,34 +118,42 @@ def calculate_hash(file_path):
     # Calculate hash of the first mipmap
     return xxhash.xxh3_64(data[128:128+mipsize]).hexdigest().upper()
 
+def u32(num):
+    return num.to_bytes(4, 'little')
 
 def write_dds(file_name, img):
     width, height = img.size
+    channels = len(img.getbands())
     mipmaps = int(math.log2(min(width, height)))+1
+    if channels != 1 and channels != 4:
+        raise NotImplementedError(f'Writing {channels} channel DDS unsupported')
     with open(file_name, 'wb') as f:
         # Header
         f.write(b'DDS ') # ID
-        f.write((124).to_bytes(4, 'little')) # Header size
+        f.write(u32(124)) # Header size
         f.write(b'\x0F\x10\x02\x00') # Flags (Caps, Height, Width, Pitch, PixelFormat, MipMaps)
-        f.write(height.to_bytes(4, 'little')) # Height
-        f.write(width.to_bytes(4, 'little')) # Width
-        f.write(width.to_bytes(4, 'little')) # Pitch
-        f.write((1).to_bytes(4, 'little')) # Depth
-        f.write(mipmaps.to_bytes(4, 'little')) # MipMaps
+        f.write(u32(height)) # Height
+        f.write(u32(width)) # Width
+        f.write(u32(width * channels)) # Pitch
+        f.write(u32(1)) # Depth
+        f.write(u32(mipmaps)) # MipMaps
         f.write(b'\0' * 44) # Reserved
         # Pixel format
-        f.write((32).to_bytes(4, 'little')) # Format header size
+        f.write(u32(32)) # Format header size
         f.write(b'\x04\x00\x00\x00') # Format flags (Single channel uncompressed)
         f.write(b'DX10') # FourCC
         f.write(b'\0' * 20) # Bit count and R G B A masks
         f.write(b'\x08\x10\x40\x00') # Caps (Complex, Texture, MipMaps)
         f.write(b'\0' * 16) # Extra caps and reserved
         # DX10 Header
-        f.write((61).to_bytes(4, 'little')) # DXGI format
-        f.write((3).to_bytes(4, 'little')) # Texture2D resource
-        f.write((0).to_bytes(4, 'little')) # Misc flags
-        f.write((1).to_bytes(4, 'little')) # Array size
-        f.write((0).to_bytes(4, 'little')) # Misc flags 2
+        if channels == 1:
+            f.write(u32(61)) # R8_UNORM
+        elif channels == 4:
+            f.write(u32(28)) # R8G8B8A8_UNORM
+        f.write(u32(3)) # Texture2D resource
+        f.write(u32(0)) # Misc flags
+        f.write(u32(1)) # Array size
+        f.write(u32(0)) # Misc flags 2
         # Write image data
         for i in range(1, mipmaps+1):
             f.write(img.tobytes('raw'))
@@ -188,8 +196,8 @@ if __name__ == '__main__':
     parser.add_argument('-m', '--meshes', help='The meshes folder to search through')
     parser.add_argument('-hm', '--hashes', help='Texture hash mapping list')
     parser.add_argument('-o', '--output', help='The USDA file to write', required=True)
-    parser.add_argument('-nr', '--no-reflection', help='Skip writing reflection DDS', action='store_true')
     parser.add_argument('-nc', '--no-use-cache', help="Don't use nifmap.json if present", action='store_true')
+    parser.add_argument('-ng', '--no-generate', help="Don't generate additional textures", action='store_true')
     args = parser.parse_args()
 
     # Validate inputs
@@ -318,7 +326,7 @@ if __name__ == '__main__':
                             input_path = relpathstd(extra_file, rootdir)
                             if input_path not in blacklist:
                                 inputs[ext] = input_path
-                                textures += 1
+                textures += len(inputs)
 
                 if inputs:
                     # Calculate hashes of textures
@@ -346,23 +354,40 @@ if __name__ == '__main__':
                         # No duplicate, write to usda
                         materials += 1
                         used_hashes[diffuse_hash] = (input_set, hash_set)
-                        if not args.no_reflection and have_PIL and '_n' in inputs and os.path.exists(paths['_n']):
+
+                        # Split alpha off of normal map and invert as roughness map
+                        if not args.no_generate and have_PIL and '_n' in inputs and os.path.exists(paths['_n']):
                             # DXT1 has 1 bit alpha, which is unsuitable for a specular map, ignore
                             with open(paths['_n'], 'rb') as dds:
                                 dds.seek(84)
                                 not_dxt1 = dds.read(4) != b'DXT1'
                             if not_dxt1:
-                                # Split alpha off of normal map
                                 with Image.open(paths['_n']) as img:
                                     if 'A' in img.mode:
                                         normal_noext = os.path.splitext(inputs['_n'])[0].removesuffix('_n')
-                                        os.makedirs(os.path.join('generated', os.path.dirname(normal_noext)), exist_ok=True)
                                         fname_reflect = os.path.join('generated', normal_noext + '_r.dds').replace('\\', '/')
                                         inputs['reflect'] = fname_reflect
-                                        write_dds(fname_reflect, ImageOps.invert(img.getchannel('A')))
+                                        os.makedirs(os.path.dirname(fname_reflect), exist_ok=True)
+                                        write_dds(fname_reflect, ImageChops.invert(img.getchannel('A')))
                                         generated += 1
                                     else:
                                         pbprint(f'Warning: {inputs["_n"]}: expected alpha in mode, found {img.mode}')
+
+                        # Convert masked emission to additive emission
+                        if not args.no_generate and have_PIL and '_g' in inputs and os.path.exists(paths['_g']):
+                            with Image.open(fname) as img_d:
+                                with Image.open(paths['_g']) as img_g:
+                                    if 'A' not in img_d.mode:
+                                        img_d.putalpha(255)
+                                    if 'A' not in img_g.mode:
+                                        img_g.putalpha(255)
+                                    if img_d.size != img_g.size:
+                                        img_d = img_d.resize(img_g.size, resample=Image.BILINEAR)
+                                    fname_glow = os.path.join('generated', inputs['_g']).replace('\\', '/')
+                                    inputs['_g'] = fname_glow
+                                    os.makedirs(os.path.dirname(fname_glow), exist_ok=True)
+                                    write_dds(fname_glow, ImageChops.multiply(img_d, img_g))
+                                    generated += 1
 
                         # Write material to USDA
                         f.write('\t\tover "mat_' + diffuse_hash + '"\n\t\t{\n\t\t\tover "Shader"\n\t\t\t{\n')
@@ -371,6 +396,7 @@ if __name__ == '__main__':
                             f.write('\t\t\t\tint inputs:encoding = 2 \n')
                         if '_g' in inputs:
                             # Set up emission
+                            f.write('\t\t\t\tbool inputs:enable_emission = 1 \n')
                             f.write('\t\t\t\tfloat inputs:emissive_intensity = 10 \n')
                         # Write texture inputs
                         f.write('\t\t\t\tasset inputs:diffuse_texture = @' + diffuse_path + '@ \n')
